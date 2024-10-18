@@ -7,7 +7,7 @@
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
@@ -53,7 +53,7 @@ class BasicBlock(nn.Module):
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
@@ -72,8 +72,8 @@ class BasicBlock(nn.Module):
         if self.downsample is not None:
             identity = self.downsample(x)
 
-        out += identity
-        out = self.relu(out)
+        out1 = out + identity
+        out = self.relu(out1)
 
         return out
 
@@ -104,11 +104,11 @@ class Bottleneck(nn.Module):
         self.bn2 = norm_layer(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.downsample = downsample
         self.stride = stride
 
-    def forward(self, x):
+    def forward(self, x,domain="source"):
         identity = x
 
         out = self.conv1(x)
@@ -125,24 +125,10 @@ class Bottleneck(nn.Module):
         if self.downsample is not None:
             identity = self.downsample(x)
 
-        out += identity
-        out = self.relu(out)
+        out1 = out+ identity
+        out = self.relu(out1)
 
         return out
-
-class GradReverse(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, alpha):
-        ctx.alpha = alpha
-        return x.view_as(x)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        output = grad_output.neg() * ctx.alpha
-        return output, None
-
-def grad_reverse(x, alpha=1.0):
-    return GradReverse.apply(x, alpha)
 
 
 class ResNet(nn.Module):
@@ -157,12 +143,7 @@ class ResNet(nn.Module):
             replace_stride_with_dilation=None,
             norm_layer=None,
             normalize=False,
-            output_dim=0,
-            hidden_mlp=0,
-            nmb_prototypes=0,
             eval_mode=False,
-            cls=True,
-            output_dim2=0,
     ):
         super(ResNet, self).__init__()
         if norm_layer is None:
@@ -185,9 +166,6 @@ class ResNet(nn.Module):
             )
         self.groups = groups
         self.base_width = width_per_group
-        self.cls = cls
-        if not self.cls:
-            output_dim2 = output_dim
 
         # change padding 3 -> 2 compared to original torchvision code because added a padding layer
         num_out_filters = width_per_group * widen
@@ -195,7 +173,7 @@ class ResNet(nn.Module):
             3, num_out_filters, kernel_size=7, stride=2, padding=2, bias=False
         )
         self.bn1 = norm_layer(num_out_filters)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.layer1 = self._make_layer(block, num_out_filters, layers[0])
         num_out_filters *= 2
@@ -216,37 +194,39 @@ class ResNet(nn.Module):
         self.l2norm = normalize
 
         # projection head
-        if output_dim == 0:
-            self.projection_head = None
-            self.projection_sechead = None
-        elif hidden_mlp == 0:
-            self.projection_head = nn.Linear(num_out_filters * block.expansion, output_dim)
-            if self.cls:
-                self.projection_sechead = nn.Linear(num_out_filters * block.expansion, output_dim2)
-        else:
-            self.projection_head = nn.Sequential(
-                nn.Linear(num_out_filters * block.expansion, hidden_mlp),
-                nn.BatchNorm1d(hidden_mlp),
-                nn.ReLU(inplace=True),
-                nn.Linear(hidden_mlp, output_dim),
-            )
-            if self.cls:
-                self.projection_sechead = nn.Sequential(
-                    nn.Linear(num_out_filters * block.expansion, hidden_mlp),
-                    nn.BatchNorm1d(hidden_mlp),
-                    nn.ReLU(inplace=True),
-                    nn.Linear(hidden_mlp, output_dim2),
-                )
+        # if output_dim == 0:
+        #     self.projection_head = None
+        #     self.projection_sechead = None
+        # elif hidden_mlp == 0:
+        #     self.projection_head = nn.Linear(num_out_filters * block.expansion, output_dim)
+        #     if self.cls:
+        #         self.projection_sechead = nn.Linear(num_out_filters * block.expansion, output_dim2)
+        # else:
+        #     self.projection_head = nn.Sequential(
+        #         nn.Linear(num_out_filters * block.expansion, hidden_mlp),
+        #         nn.BatchNorm1d(hidden_mlp),
+        #         nn.ReLU(inplace=False),
+        #         # nn.PReLU(),
+        #         nn.Linear(hidden_mlp, output_dim),
+        #     )
+        #     if self.cls:
+        #         self.projection_sechead = nn.Sequential(
+        #             nn.Linear(num_out_filters * block.expansion, hidden_mlp),
+        #             nn.BatchNorm1d(hidden_mlp),
+        #             nn.ReLU(inplace=False),
+        #             # nn.PReLU(),
+        #             nn.Linear(hidden_mlp, output_dim2),
+        #         )
 
-        # prototype layer
-        self.prototypes = None
-        self.prototypes_sec = None
-        if isinstance(nmb_prototypes, list):
-            self.prototypes = MultiPrototypes(output_dim, nmb_prototypes)
-            # self.prototypes_sec = MultiPrototypes(output_dim, nmb_prototypes,name="sec")
-        elif nmb_prototypes > 0:
-            self.prototypes = nn.Linear(output_dim, nmb_prototypes, bias=False)
-            # self.prototypes_sec = nn.Linear(output_dim, nmb_prototypes, bias=False)
+        # # prototype layer
+        # self.prototypes = None
+        # self.prototypes_sec = None
+        # if isinstance(nmb_prototypes, list):
+        #     self.prototypes = MultiPrototypes(output_dim, nmb_prototypes)
+        #     # self.prototypes_sec = MultiPrototypes(output_dim, nmb_prototypes,name="sec")
+        # elif nmb_prototypes > 0:
+        #     self.prototypes = nn.Linear(output_dim, nmb_prototypes, bias=False)
+        #     # self.prototypes_sec = nn.Linear(output_dim, nmb_prototypes, bias=False)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -254,7 +234,7 @@ class ResNet(nn.Module):
             elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-        self.domain_head = DomainDiscriminator()
+        # self.domain_head = DomainDiscriminator()
 
         # Zero-initialize the last BN in each residual branch,
         # so that the residual branch starts with zeros, and each residual block behaves like an identity.
@@ -328,8 +308,6 @@ class ResNet(nn.Module):
         return x
 
     def forward_head(self, x):
-        domain = self.domain_head(x)
-        a = self.domain_head.domain_classifier[2](self.domain_head.domain_classifier[1](self.domain_head.domain_classifier[0](x)))
         if self.projection_head is not None:
             x = self.projection_head(x)
 
@@ -338,10 +316,10 @@ class ResNet(nn.Module):
 
         if self.prototypes is not None:
             return x, self.prototypes(x)
-        return x,domain,a
+        return x
     
     def forward_sechead(self, x):
-        domain = self.domain_head(x)
+        domain,a = self.domain_head(x)
         if self.projection_sechead is not None:
             x = self.projection_sechead(x)
 
@@ -352,20 +330,60 @@ class ResNet(nn.Module):
             return x, self.prototypes_sec(x)
         return x,domain
 
-    def forward(self, inputs1,inputs2=None):
+    # def forward(self, inputs1,inputs2=None):
+    #     if not isinstance(inputs1, list):
+    #         inputs1 = [inputs1]
+    #         if inputs2 is not None:
+    #             inputs2 = [inputs2]
+    #     idx_crops1 = torch.cumsum(torch.unique_consecutive(
+    #         torch.tensor([inp.shape[-1] for inp in inputs1]),
+    #         return_counts=True,
+    #     )[1], 0)
+    #     if inputs2 is not None:
+    #         idx_crops2 = torch.cumsum(torch.unique_consecutive(
+    #             torch.tensor([inp.shape[-1] for inp in inputs2]),
+    #             return_counts=True,
+    #         )[1], 0)
+    #     start_idx = 0
+    #     for end_idx in idx_crops1:
+    #         _out = self.forward_backbone(torch.cat(inputs1[start_idx: end_idx]).cuda(non_blocking=True))
+    #         if start_idx == 0:
+    #             output1 = _out
+    #         else:
+    #             output1 = torch.cat((output1, _out))
+    #         start_idx = end_idx
+    #     if inputs2 is not None:
+    #         start_idx = 0
+    #         for end_idx in idx_crops2:
+    #             _out = self.forward_backbone(torch.cat(inputs2[start_idx: end_idx]).cuda(non_blocking=True))
+    #             if start_idx == 0:
+    #                 output2 = _out
+    #             else:
+    #                 output2 = torch.cat((output2, _out))
+    #             start_idx = end_idx
+    #     emb1 = output1
+    #     output1,domain1,a1 = self.forward_head(output1)
+    #     # output1 = self.forward_head(output1)
+    #     if inputs2 is not None:
+    #         emb2 = output2
+    #         if self.cls:
+    #             output2,domain2 = self.forward_sechead(output2)
+    #         else:
+    #             output2,domain2,a2 = self.forward_head(output2)
+    #             # output2 = self.forward_head(output2)
+
+    #     if inputs2 is not None:
+    #         return emb1,output1,domain1,a1,emb2,output2,domain2,a2
+    #     else:
+    #         return emb1,output1,domain1,a1
+
+    def forward(self, inputs1):
         if not isinstance(inputs1, list):
             inputs1 = [inputs1]
-            if inputs2 is not None:
-                inputs2 = [inputs2]
         idx_crops1 = torch.cumsum(torch.unique_consecutive(
             torch.tensor([inp.shape[-1] for inp in inputs1]),
             return_counts=True,
         )[1], 0)
-        if inputs2 is not None:
-            idx_crops2 = torch.cumsum(torch.unique_consecutive(
-                torch.tensor([inp.shape[-1] for inp in inputs2]),
-                return_counts=True,
-            )[1], 0)
         start_idx = 0
         for end_idx in idx_crops1:
             _out = self.forward_backbone(torch.cat(inputs1[start_idx: end_idx]).cuda(non_blocking=True))
@@ -374,28 +392,9 @@ class ResNet(nn.Module):
             else:
                 output1 = torch.cat((output1, _out))
             start_idx = end_idx
-        if inputs2 is not None:
-            start_idx = 0
-            for end_idx in idx_crops2:
-                _out = self.forward_backbone(torch.cat(inputs2[start_idx: end_idx]).cuda(non_blocking=True))
-                if start_idx == 0:
-                    output2 = _out
-                else:
-                    output2 = torch.cat((output2, _out))
-                start_idx = end_idx
         emb1 = output1
-        output1,domain1,a1 = self.forward_head(output1)
-        if inputs2 is not None:
-            emb2 = output2
-            if self.cls:
-                output2,domain2 = self.forward_sechead(output2)
-            else:
-                output2,domain2,a2 = self.forward_head(output2)
-
-        if inputs2 is not None:
-            return emb1,output1,domain1,a1,emb2,output2,domain2,a2
-        else:
-            return emb1,output1,domain1,a1
+        # output1 = self.forward_head(output1)
+        return emb1
     
     # def forward(self, inputs1,en_fea=False):
     #     if not isinstance(inputs1, list):
@@ -466,18 +465,53 @@ class MultiPrototypes(nn.Module):
 
 # source_domain_preds = domain_discriminator(grad_reverse(source_features, alpha=1.0))
 # target_domain_preds = domain_discriminator(grad_reverse(target_features, alpha=1.0))
+class classifier(nn.Module):
+    def __init__(self,output_dim=0,hidden_mlp=0,normalize=False):
+        super(classifier,self).__init__()
+        # projection head
+        if output_dim == 0:
+            self.projection_head = None
+            self.projection_sechead = None
+        elif hidden_mlp == 0:
+            self.projection_head = nn.Linear(2048, output_dim)
+        else:
+            self.projection_head = nn.Sequential(
+                nn.Linear(2048, hidden_mlp),
+                nn.BatchNorm1d(hidden_mlp),
+                nn.ReLU(inplace=False),
+                # nn.PReLU(),
+                nn.Linear(hidden_mlp, output_dim),
+            )
+        self.l2norm = normalize
+    def forward(self, x):
+        if self.projection_head is not None:
+            x = self.projection_head(x)
+
+        if self.l2norm:
+            x = nn.functional.normalize(x, dim=1, p=2)
+
+        return x
+
 class DomainDiscriminator(nn.Module):
     def __init__(self):
         super(DomainDiscriminator, self).__init__()
-        self.domain_classifier = nn.Sequential(
-            nn.Linear(2048, 100),
-            nn.BatchNorm1d(100),
-            nn.ReLU(inplace=True),
-            nn.Linear(100, 2),  # 2表示源域和目标域
-            nn.LogSoftmax(dim=1),
-        )
-    def forward(self, x):
-        return self.domain_classifier(grad_reverse(x,alpha=1))
+        dim =100
+        self.fc1 = nn.Linear(2048, dim)
+        self.bn1 = nn.BatchNorm1d(dim, momentum=0.01)
+        self.relu = nn.ReLU(inplace=False)
+        self.fc2 = nn.Linear(dim, 2)  # 2表示源域和目标域
+        self.logit = nn.LogSoftmax(dim=1)
+    def forward(self, x,domain="source"):
+        # x=x
+        x = self.fc1(x)
+        # print(f"Source features version before: {x._version}")
+        x = self.bn1(x)
+        
+        # print(f"Source features version before: {x._version}")
+        out = x.detach()  # 保存一个副本以避免潜在的梯度问题
+        x = self.relu(x)
+        x = self.fc2(x)
+        return self.logit(x),out
 
 def resnet50(**kwargs):
     return ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)

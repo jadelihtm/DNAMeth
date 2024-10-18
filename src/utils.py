@@ -133,18 +133,25 @@ def restart_from_checkpoint(ckp_paths, run_variables=None, **kwargs):
     # example: {'state_dict': model}
 
     model = kwargs["state_dict"]
+    classifier = kwargs["classifier"]
+    domainer=kwargs["domainer"]
     mode = kwargs["mode"]
     if mode == "train":
         for key,_ in checkpoint["state_dict"].items():
-            if  not "projection" in key:# and not "projection_head" in key: #(******)
-                model.state_dict()[key].copy_(checkpoint["state_dict"][key])
+            if  not "head" in key:# and not "projection_head" in key: #(******)
+                if key in model.state_dict().keys():
+                    model.state_dict()[key].copy_(checkpoint["state_dict"][key])
     elif mode == "test":
         for key,_ in checkpoint["state_dict"].items():
-            model.state_dict()[key].copy_(checkpoint["state_dict"][key])
+            if not "head" in key :
+                model.state_dict()[key].copy_(checkpoint["state_dict"][key])
+            else:
+                classifier.state_dict()[key].copy_(checkpoint["state_dict"][key])
     elif mode == "nat_train":
         for key,_ in checkpoint.items():
             if not "prototypes" in key  and not "projection" in key:# and not "projection_head" in key: #(******)
-                model.state_dict()[key].copy_(checkpoint[key])
+                if key in model.state_dict().keys():
+                    model.state_dict()[key].copy_(checkpoint[key])
 
     logger.info("=> loaded {} from checkpoint '{}'".format(key, ckp_path))
 
